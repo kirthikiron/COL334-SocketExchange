@@ -50,6 +50,81 @@ def cleanup_client(conn_obj, role, username):
     except:
         pass
 
+def cancel_order(username, order_id):
+    """
+    Searches the order book to cancel an active order.
+    Returns the appropriate response string for the submitter.
+    """
+    for instrument in order_book:
+        for side in ['BUY', 'SELL']:
+            for i, order in enumerate(order_book[instrument][side]):
+                if order['id'] == order_id:
+                    if order['username'] == username:
+                        order_book[instrument][side].pop(i)
+                        return f"ORDER_CANCELLED {order_id}"
+                    else:
+                        return "ERROR not owner"
+    return "ERROR unknown order"
+
+def match_order(new_order):
+    """
+    Executes exact-price matching for a new order.
+    Returns a list of (Conn, response_string) tuples to send asynchronously.
+    """
+    instrument = new_order['instrument']
+    side = new_order['side']
+    opposing_side = 'SELL' if side == 'BUY' else 'BUY'
+    
+    outbound_messages = []
+    
+    # 1. Acknowledge the order to the submitter immediately
+    outbound_messages.append((new_order['conn'], f"ORDER_ACCEPTED {new_order['id']}"))
+    
+    resting_orders = order_book[instrument][opposing_side]
+    i = 0
+    
+    # 2. Iterate through opposing orders (FIFO order is implicitly maintained by list append)
+    while i < len(resting_orders) and new_order['remaining'] > 0:
+        resting = resting_orders[i]
+        
+        # Exact-price match condition
+        if resting['price'] == new_order['price']:
+            trade_qty = min(new_order['remaining'], resting['remaining'])
+            
+            # Deduct quantities
+            new_order['remaining'] -= trade_qty
+            resting['remaining'] -= trade_qty
+            
+            # Format buyer and seller notifications
+            buyer_conn = new_order['conn'] if side == 'BUY' else resting['conn']
+            seller_conn = new_order['conn'] if side == 'SELL' else resting['conn']
+            
+            if buyer_conn.alive:
+                outbound_messages.append((buyer_conn, f"BOUGHT {instrument} {trade_qty} {new_order['price']}"))
+            if seller_conn.alive:
+                outbound_messages.append((seller_conn, f"SOLD {instrument} {trade_qty} {new_order['price']}"))
+                
+            # Broadcast to Market-Data subscribers
+            for md_conn in md_subscribers[instrument]:
+                if md_conn.alive:
+                    outbound_messages.append((md_conn, f"TRADE {instrument} {trade_qty} {new_order['price']}"))
+            
+            # Remove resting order if fully consumed
+            if resting['remaining'] == 0:
+                resting_orders.pop(i)
+            else:
+                i += 1
+        else:
+            i += 1
+
+    # 3. If the incoming order still has quantity, add it to the book
+    if new_order['remaining'] > 0:
+        order_book[instrument][side].append(new_order)
+        
+    return outbound_messages
+
+
+
 def process_message(msg, conn_obj, client_state):
     """
     Validates state and commands under lock, returning a list of 
@@ -119,11 +194,54 @@ def process_message(msg, conn_obj, client_state):
 
         # --- 3. TRADER CLIENTS ---
         elif role == "TRADER":
+            username = client_state["username"]
+            
             if command in ["BUY", "SELL"]:
-                # Matching engine goes here in the next step
-                return [(conn_obj, "ERROR order matching not implemented yet")]
+                if len(parts) != 4:
+                    return [(conn_obj, f"ERROR usage: {command} <instrument> <quantity> <price>")]
+                
+                instrument = parts[1]
+                if instrument not in order_book:
+                    return [(conn_obj, "ERROR unknown instrument")]
+                
+                try:
+                    quantity = int(parts[2])
+                    price = int(parts[3])
+                    if quantity <= 0 or price <= 0:
+                        raise ValueError
+                except ValueError:
+                    return [(conn_obj, "ERROR quantity and price must be positive integers")]
+                
+                global next_order_id
+                
+                # Construct the order dictionary
+                new_order = {
+                    'id': next_order_id,
+                    'username': username,
+                    'conn': conn_obj,
+                    'instrument': instrument,
+                    'side': command,
+                    'price': price,
+                    'quantity': quantity,
+                    'remaining': quantity
+                }
+                next_order_id += 1
+                
+                # Execute matching and collect all resulting network messages
+                matching_messages = match_order(new_order)
+                outbound_messages.extend(matching_messages)
+                
             elif command == "CANCEL":
-                return [(conn_obj, "ERROR cancel not implemented yet")]
+                if len(parts) != 2:
+                    return [(conn_obj, "ERROR usage: CANCEL <order_id>")]
+                try:
+                    target_id = int(parts[1])
+                except ValueError:
+                    return [(conn_obj, "ERROR invalid order_id")]
+                    
+                response = cancel_order(username, target_id)
+                outbound_messages.append((conn_obj, response))
+                
             elif command == "QUIT":
                 return "QUIT"
             else:
