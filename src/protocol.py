@@ -18,7 +18,7 @@ class LineBuffer:
             line_bytes, self.buffer = self.buffer.split(b'\n', 1)
             
             # Decode the complete line from bytes to a standard Python string
-            messages.append(line_bytes.decode('utf-8'))
+            messages.append(line_bytes.decode('utf-8', errors='replace'))
             
         # Return the list of complete messages (could be 0, 1, or many)
         return messages

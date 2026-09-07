@@ -207,10 +207,11 @@ def process_message(msg, conn_obj, client_state):
                 try:
                     quantity = int(parts[2])
                     price = int(parts[3])
-                    if quantity <= 0 or price <= 0:
-                        raise ValueError
+                    # Strictly enforce the 32-bit integer limits required by Section 2.1
+                    if not (1 <= quantity <= 2147483647 and 1 <= price <= 2147483647):
+                        return [(conn_obj, "ERROR quantity and price out of range")]
                 except ValueError:
-                    return [(conn_obj, "ERROR quantity and price must be positive integers")]
+                    return [(conn_obj, "ERROR quantity and price must be integers")]
                 
                 global next_order_id
                 
