@@ -298,7 +298,11 @@ def main():
     
     try:
         while True:
-            sock, addr = server_sock.accept()
+            try:
+                sock, addr = server_sock.accept()
+            except (ConnectionAbortedError, OSError) as e:
+                print(f"accept() failed, continuing: {e}", file=sys.stderr)
+                continue
             client_thread = threading.Thread(target=handle_client, args=(sock, addr), daemon=True)
             client_thread.start()
     except KeyboardInterrupt:
